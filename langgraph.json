@@ -1,0 +1,7 @@
+{ "dockerfile_lines": [],
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "./agent.py:app"
+  },
+  "env": "./.env"
+}
