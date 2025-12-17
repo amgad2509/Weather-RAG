@@ -7,6 +7,8 @@ import streamlit as st
 from datetime import datetime
 import json
 import re
+import asyncio
+import html
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from agent import WeatherActivityClothingAgent
@@ -38,6 +40,7 @@ st.markdown(
     margin-bottom: 5px;
     color: #222;
     font-weight: 500;
+    white-space: normal;
 }
 .user-bubble {
     background-color: #DCF8C6;
@@ -64,9 +67,6 @@ st.markdown(
 _REASONING_RE = re.compile(r"(?is)<reasoning>\s*(.*?)\s*</reasoning>")
 
 def split_reasoning(content: str):
-    """
-    Returns (reasoning_text_or_None, answer_text)
-    """
     if not content:
         return None, ""
     m = _REASONING_RE.search(content)
@@ -76,6 +76,24 @@ def split_reasoning(content: str):
     answer = _REASONING_RE.sub("", content, count=1).strip()
     return reasoning, answer
 
+def strip_reasoning_during_stream(raw: str):
+    """
+    While streaming:
+    - If <reasoning> started but not closed => show nothing (avoid showing tags)
+    - If closed => show answer only
+    - If no reasoning tags => show raw
+    """
+    if not raw:
+        return ""
+    lower = raw.lower()
+    if "<reasoning>" in lower and "</reasoning>" not in lower:
+        # reasoning is currently streaming, hide it
+        before = lower.split("<reasoning>", 1)[0]
+        return before.strip()  # usually empty
+    # if closed, remove it
+    _, answer = split_reasoning(raw)
+    return answer
+
 
 # -------------------------
 # TERMINAL LOGGING ONLY
@@ -83,45 +101,6 @@ def split_reasoning(content: str):
 def tlog(message: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {message}", flush=True)
-
-
-def msg_key(m):
-    t = type(m).__name__
-    c = getattr(m, "content", "")
-    tcid = getattr(m, "tool_call_id", "")
-    return (t, c, tcid)
-
-
-def merge_messages(current, incoming):
-    """
-    Robust merge:
-    - If incoming looks like full state (prefix matches current), replace.
-    - Else treat as delta and append.
-    """
-    if not incoming:
-        return current
-
-    # likely full state
-    if current and len(incoming) >= len(current):
-        try:
-            prefix_ok = True
-            for i in range(min(len(current), len(incoming))):
-                if msg_key(incoming[i]) != msg_key(current[i]):
-                    prefix_ok = False
-                    break
-            if prefix_ok:
-                return incoming
-        except Exception:
-            pass
-
-    # delta append
-    merged = list(current)
-    for m in incoming:
-        if merged and msg_key(merged[-1]) == msg_key(m):
-            continue
-        merged.append(m)
-    return merged
-
 
 def _safe_preview(x, n=160):
     if x is None:
@@ -134,43 +113,24 @@ def _safe_preview(x, n=160):
     x = x.strip().replace("\n", " ")
     return x[:n] + ("..." if len(x) > n else "")
 
+def render_bubble(content: str, who: str, timestamp: str):
+    safe = html.escape(content).replace("\n", "<br>")
+    bubble_class = "user-bubble" if who == "user" else "bot-bubble"
+    return f"""
+<div class="chat-bubble {bubble_class}">
+  {safe}
+  <div class="timestamp">{timestamp}</div>
+</div>
+"""
 
-def iter_tool_calls_from_ai(ai_msg):
+def is_tool_only_ai(msg: AIMessage) -> bool:
     """
-    Extract tool calls from AIMessage across different LangChain formats.
-    Returns tuples: (call_id, tool_name, tool_args)
+    Skip AIMessage that has no content and only exists to request tool calls
+    (these were causing the empty white lines).
     """
-    calls = getattr(ai_msg, "tool_calls", None)
-    if not calls:
-        calls = getattr(ai_msg, "additional_kwargs", {}).get("tool_calls")
-
-    if not calls:
-        return []
-
-    out = []
-    for c in calls:
-        call_id, name, args = None, None, None
-
-        if isinstance(c, dict):
-            # LangChain style: {"name": "...", "args": {...}, "id": "..."}
-            name = c.get("name")
-            args = c.get("args")
-            call_id = c.get("id")
-
-            # OpenAI-like style: {"id": "...", "function": {"name": "...", "arguments": "..."}}
-            if not name and "function" in c:
-                name = (c.get("function") or {}).get("name")
-                args = (c.get("function") or {}).get("arguments")
-
-        else:
-            # object style
-            name = getattr(c, "name", None)
-            args = getattr(c, "args", None)
-            call_id = getattr(c, "id", None)
-
-        if name:
-            out.append((call_id, name, args))
-    return out
+    c = (msg.content or "").strip()
+    tool_calls = getattr(msg, "tool_calls", None) or getattr(msg, "additional_kwargs", {}).get("tool_calls")
+    return (not c) and bool(tool_calls)
 
 
 # -------------------------
@@ -179,17 +139,6 @@ def iter_tool_calls_from_ai(ai_msg):
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# Map tool_call_id -> tool_name (so ToolMessage can be labeled)
-if "tool_call_map" not in st.session_state:
-    st.session_state.tool_call_map = {}
-
-# Prevent duplicate tool logs across steps/reruns
-if "logged_tool_calls" not in st.session_state:
-    st.session_state.logged_tool_calls = set()
-
-if "logged_tool_results" not in st.session_state:
-    st.session_state.logged_tool_results = set()
-
 
 # -------------------------
 # LOAD AGENT (cached)
@@ -197,7 +146,6 @@ if "logged_tool_results" not in st.session_state:
 @st.cache_resource
 def get_agent():
     return WeatherActivityClothingAgent()
-
 
 with st.spinner("Loading smart weather assistant..."):
     if "agent" not in st.session_state:
@@ -214,11 +162,47 @@ col1, col2 = st.columns([1, 6])
 with col1:
     if st.button("Clear Chat"):
         st.session_state.chat_history = []
-        st.session_state.tool_call_map = {}
-        st.session_state.logged_tool_calls = set()
-        st.session_state.logged_tool_results = set()
         tlog("Chat cleared by user.")
         st.rerun()
+
+
+# -------------------------
+# RENDER EXISTING CHAT FIRST
+# -------------------------
+assistant_i = 0
+
+for msg in st.session_state.chat_history:
+    timestamp = datetime.now().strftime("%H:%M")
+
+    if isinstance(msg, ToolMessage):
+        continue
+
+    if isinstance(msg, HumanMessage):
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(render_bubble(msg.content, "user", timestamp), unsafe_allow_html=True)
+
+    elif isinstance(msg, AIMessage):
+        # remove empty tool-only AI messages (fixes the blank lines)
+        if is_tool_only_ai(msg):
+            continue
+
+        reasoning_text, answer_text = split_reasoning(msg.content or "")
+        content_to_show = answer_text.strip() if answer_text else (msg.content or "").strip()
+
+        # If nothing to show, skip (avoids another blank bar)
+        if not content_to_show and not reasoning_text:
+            continue
+
+        with st.chat_message("assistant", avatar="🤖"):
+            if reasoning_text:
+                unique_label = "Reasoning" + ("\u200b" * assistant_i)
+                with st.expander(unique_label, expanded=False):
+                    st.markdown(reasoning_text)
+
+            if content_to_show:
+                st.markdown(render_bubble(content_to_show, "assistant", timestamp), unsafe_allow_html=True)
+
+        assistant_i += 1
 
 
 # -------------------------
@@ -227,138 +211,129 @@ with col1:
 user_input = st.chat_input("Type your message here...")
 
 
+def _run_coro(coro):
+    try:
+        return asyncio.run(coro)
+    except RuntimeError as e:
+        # In case Streamlit already has a running loop in some environments
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+        raise
+
+
+async def run_graph_token_stream(new_history, placeholder_md):
+    """
+    Runs the graph via astream_events (token-by-token) and updates the placeholder.
+    Also captures final messages from the root chain end event when available.
+    """
+    agent = st.session_state.agent
+
+    # buffers
+    current_text = ""
+    last_nonempty_text = ""
+    final_messages = None
+
+    # initial blank bubble (optional)
+    ts = datetime.now().strftime("%H:%M")
+    placeholder_md.markdown(render_bubble("", "assistant", ts), unsafe_allow_html=True)
+
+    if hasattr(agent.app, "astream_events"):
+        async for ev in agent.app.astream_events({"messages": new_history}, version="v2"):
+            et = ev.get("event", "")
+            data = ev.get("data", {}) or {}
+
+            if et == "on_chat_model_start":
+                current_text = ""
+
+            elif et == "on_chat_model_stream":
+                chunk = data.get("chunk")
+                piece = ""
+                try:
+                    piece = getattr(chunk, "content", "") or ""
+                    if isinstance(piece, list):
+                        # some models stream structured content; best-effort stringify
+                        piece = "".join([p.get("text", "") if isinstance(p, dict) else str(p) for p in piece])
+                    piece = str(piece)
+                except Exception:
+                    piece = ""
+
+                if piece:
+                    current_text += piece
+                    shown = strip_reasoning_during_stream(current_text)
+                    placeholder_md.markdown(render_bubble(shown, "assistant", ts), unsafe_allow_html=True)
+
+            elif et == "on_chat_model_end":
+                if current_text.strip():
+                    last_nonempty_text = current_text
+
+            elif et == "on_tool_start":
+                name = ev.get("name", "tool")
+                tool_in = data.get("input")
+                tlog(f"TOOL_CALL -> {name} | args={_safe_preview(tool_in, 220)}")
+
+            elif et == "on_tool_end":
+                name = ev.get("name", "tool")
+                tool_out = data.get("output")
+                tlog(f"TOOL_RESULT <- {name} | output={_safe_preview(tool_out, 260)}")
+
+            elif et == "on_chain_end":
+                out = data.get("output") or data.get("outputs")
+                if isinstance(out, dict) and "messages" in out and isinstance(out["messages"], list):
+                    final_messages = out["messages"]
+
+        return final_messages, last_nonempty_text
+
+    # Fallback: no events support (no token streaming)
+    tlog("WARNING: astream_events not available. Falling back to non-token streaming.")
+    if hasattr(agent.app, "ainvoke"):
+        out = await agent.app.ainvoke({"messages": new_history})
+        if isinstance(out, dict) and "messages" in out:
+            return out["messages"], ""
+    return None, ""
+
+
 # -------------------------
-# RUN AGENT + TERMINAL LOGS (WITH TOOL NAMES)
+# HANDLE NEW INPUT (token streaming)
 # -------------------------
 if user_input:
     tlog(f"User: {_safe_preview(user_input, 200)}")
 
+    # Append user message to history
     st.session_state.chat_history.append(HumanMessage(content=user_input))
 
-    try:
-        tlog("Starting graph execution (stream).")
-
-        for step_idx, step in enumerate(
-            st.session_state.agent.app.stream({"messages": st.session_state.chat_history})
-        ):
-            for node_name, payload in step.items():
-                if not (isinstance(payload, dict) and "messages" in payload):
-                    continue
-
-                incoming = payload["messages"]
-
-                # Log tool calls / tool results from incoming (deduped)
-                for m in incoming:
-                    # Tool calls requested by AI
-                    if isinstance(m, AIMessage):
-                        for call_id, tool_name, tool_args in iter_tool_calls_from_ai(m):
-                            # call_id may be None sometimes; dedupe by (tool_name + args) fallback
-                            dedupe_id = call_id or f"{tool_name}:{_safe_preview(tool_args, 120)}"
-                            if dedupe_id in st.session_state.logged_tool_calls:
-                                continue
-
-                            st.session_state.logged_tool_calls.add(dedupe_id)
-                            if call_id:
-                                st.session_state.tool_call_map[call_id] = tool_name
-
-                            tlog(
-                                f"TOOL_CALL -> {tool_name}"
-                                + (f" | id={call_id}" if call_id else "")
-                                + (f" | args={_safe_preview(tool_args, 220)}" if tool_args is not None else "")
-                            )
-
-                    # Tool results returned
-                    if isinstance(m, ToolMessage):
-                        tcid = getattr(m, "tool_call_id", None)
-                        dedupe_id = tcid or f"tool_result:{_safe_preview(m.content, 120)}"
-                        if dedupe_id in st.session_state.logged_tool_results:
-                            continue
-
-                        st.session_state.logged_tool_results.add(dedupe_id)
-
-                        tool_name = getattr(m, "name", None) or (
-                            st.session_state.tool_call_map.get(tcid, "unknown_tool")
-                            if tcid
-                            else "unknown_tool"
-                        )
-
-                        tlog(
-                            f"TOOL_RESULT <- {tool_name}"
-                            + (f" | id={tcid}" if tcid else "")
-                            + f" | output={_safe_preview(m.content, 260)}"
-                        )
-
-                # Merge messages into chat_history (keep user queries)
-                before = len(st.session_state.chat_history)
-                st.session_state.chat_history = merge_messages(st.session_state.chat_history, incoming)
-                after = len(st.session_state.chat_history)
-                added = after - before
-
-                last = st.session_state.chat_history[-1] if st.session_state.chat_history else None
-                last_type = type(last).__name__ if last else "None"
-                last_preview = _safe_preview(getattr(last, "content", ""), 160) if last else ""
-
-                tlog(
-                    f"Step {step_idx} | node='{node_name}' | incoming={len(incoming)} | added={added} | last={last_type}"
-                    + (f" | last_preview='{last_preview}'" if last_preview else "")
-                )
-
-        tlog(f"Graph completed. Total messages now: {len(st.session_state.chat_history)}")
-
-    except Exception as e:
-        tlog(f"ERROR during graph execution: {repr(e)}")
-        st.session_state.chat_history.append(
-            AIMessage(content=f"Sorry, an error occurred while running the agent:\n{e}")
-        )
-
-    st.rerun()
-
-
-# -------------------------
-# RENDER CHAT (show Human + AI, hide ToolMessage)
-# -------------------------
-assistant_i = 0
-
-for msg in st.session_state.chat_history:
+    # Render user bubble immediately
     timestamp = datetime.now().strftime("%H:%M")
+    with st.chat_message("user", avatar="👤"):
+        st.markdown(render_bubble(user_input, "user", timestamp), unsafe_allow_html=True)
 
-    if isinstance(msg, HumanMessage):
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(
-                f"""
-<div class="chat-bubble user-bubble">
-  {msg.content}
-  <div class="timestamp">{timestamp}</div>
-</div>
-""",
-                unsafe_allow_html=True,
+    # Assistant streaming placeholder
+    with st.chat_message("assistant", avatar="🤖"):
+        placeholder = st.empty()
+
+        try:
+            tlog("Starting graph execution (astream_events for token streaming).")
+            final_msgs, last_text = _run_coro(
+                run_graph_token_stream(st.session_state.chat_history, placeholder)
             )
 
-    elif isinstance(msg, AIMessage):
-        with st.chat_message("assistant", avatar="🤖"):
-            reasoning_text, answer_text = split_reasoning(msg.content)
+            if final_msgs is not None:
+                # replace/merge with final state messages
+                # safest: just set to final (it should include full state)
+                st.session_state.chat_history = final_msgs
+            else:
+                # fallback: at least keep the streamed final text
+                if last_text.strip():
+                    st.session_state.chat_history.append(AIMessage(content=last_text))
 
-            # Collapsible reasoning (ChatGPT-like): label must be unique (Streamlit uses label as key)
-            if reasoning_text:
-                unique_label = "Reasoning" + ("\u200b" * assistant_i)  # invisible uniqueness
-                with st.expander(unique_label, expanded=False):
-                    st.markdown(reasoning_text)
-
-            # Show ONLY final answer in bubble
-            content_to_show = answer_text if answer_text else (msg.content or "")
-
-            st.markdown(
-                f"""
-<div class="chat-bubble bot-bubble">
-  {content_to_show}
-  <div class="timestamp">{timestamp}</div>
-</div>
-""",
-                unsafe_allow_html=True,
+        except Exception as e:
+            tlog(f"ERROR during graph execution: {repr(e)}")
+            st.session_state.chat_history.append(
+                AIMessage(content=f"Sorry, an error occurred while running the agent:\n{e}")
             )
 
-        assistant_i += 1
-
-    elif isinstance(msg, ToolMessage):
-        # Keep tool messages for context, but don't show them
-        continue
+    # Rerun to render the reasoning expander cleanly and persist state
+    st.rerun()

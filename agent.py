@@ -3,6 +3,7 @@ import json
 import requests
 from urllib.parse import urlencode
 from dotenv import load_dotenv
+import inspect
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool, create_retriever_tool
@@ -21,12 +22,10 @@ from cassio.table.cql import STANDARD_ANALYZER
 
 from langchain_cohere import CohereRerank
 
-# ContextualCompressionRetriever is in langchain-classic for LangChain v1
 try:
     from langchain_classic.retrievers.contextual_compression import ContextualCompressionRetriever
 except Exception:
     from langchain_classic.retrievers import ContextualCompressionRetriever
-
 
 load_dotenv()
 
@@ -65,7 +64,7 @@ class WeatherActivityClothingAgent:
         cassio.init(database_id=db_id, token=token)
 
         # -------------------------
-        # PROMPT (UPDATED: 3 tools + search-first for non-weather factual queries)
+        # PROMPT
         # -------------------------
         self.prompt = """
         You are a helpful assistant with access to three tools.
@@ -137,17 +136,29 @@ class WeatherActivityClothingAgent:
         - Be clear, accurate, and concise.
         """
 
-
         # -------------------------
-        # LLM
+        # LLM (ENABLE STREAMING SAFELY)
         # -------------------------
-        self.llm = ChatGroq(
+        llm_kwargs = dict(
             model=groq_model,
             temperature=0,
             max_tokens=None,
             timeout=None,
             max_retries=2,
         )
+
+        # Try to enable streaming without breaking if param name differs
+        try:
+            sig = inspect.signature(ChatGroq.__init__)
+            if "streaming" in sig.parameters:
+                llm_kwargs["streaming"] = True
+            elif "stream" in sig.parameters:
+                llm_kwargs["stream"] = True
+        except Exception:
+            # best-effort
+            llm_kwargs["streaming"] = True
+
+        self.llm = ChatGroq(**llm_kwargs)
 
         # -------------------------
         # WEATHER + EMBEDDINGS + VECTORSTORE
@@ -170,42 +181,33 @@ class WeatherActivityClothingAgent:
         )
 
         self.retriever_tool = create_retriever_tool(
-        compression_retriever,
-        name="retrieve_weather_activity_clothing_info",
-        description=(
-            "This tool retrieves contextually relevant and compressed information about recommended outdoor activities "
-            "and appropriate clothing based on current weather conditions and location. "
-            "It leverages a comprehensive global guide covering multiple weather scenarios—such as sunny, rainy, snowy, "
-            "windy, cloudy, hot, and cold conditions—tailored for diverse countries including Egypt, UK, USA, Japan, and Australia. "
-            "The recommendations ensure users get personalized, climate-specific advice for comfort and safety during outdoor plans."
-        ),
-    )
+            compression_retriever,
+            name="retrieve_weather_activity_clothing_info",
+            description=(
+                "Retrieves contextually relevant and compressed info about recommended outdoor activities "
+                "and appropriate clothing based on weather conditions and location."
+            ),
+        )
 
         # -------------------------
-        # TOOLS (UPDATED: add DuckDuckGo internet_search)
+        # TOOLS
         # -------------------------
         @tool
         def weather_query(location: str) -> str:
             """
-                Fetches real-time weather data for a specified location using OpenWeatherMap API.
-
-                Provides detailed weather information including temperature, humidity, wind speed,
-                and overall weather conditions for the given country or city.
-
-                Args:
-                    location (str): The name of the location to get weather information for.
-
-                Returns:
-                    str: A descriptive weather report string with current meteorological data.
+            Fetches real-time weather data for a specified location using OpenWeatherMap API.
             """
-            return self.weather.run(location)
+            loc = (location or "").strip()
+            bad = {"?", "unknown", "n/a", "na", "none", "null", ""}
+            if loc.lower() in bad:
+                return "ERROR: invalid location. Ask the user: Which location (country/city)?"
+            return self.weather.run(loc)
 
         @tool
         def internet_search(query: str, max_related: int = 6) -> str:
             """
-                Lightweight web lookup via DuckDuckGo Instant Answer API.
-                Best-effort for quick facts, definitions, entities.
-                Returns a compact summary + a few source links when available.
+            Lightweight web lookup via DuckDuckGo Instant Answer API.
+            Returns a compact summary + a few source links when available.
             """
             if not query or not query.strip():
                 return "Error: empty query."
@@ -269,7 +271,7 @@ class WeatherActivityClothingAgent:
                     lines.append(f"- {txt}" + (f" ({u})" if u else ""))
 
             if len(lines) <= 1:
-                return "No instant-answer content found for this query. Try a more specific query (teams + league + date/season)."
+                return "No instant-answer content found for this query. Try a more specific query."
 
             return "\n".join(lines)
 
@@ -294,18 +296,13 @@ class WeatherActivityClothingAgent:
         self.graph.set_entry_point("ai_agent")
         self.graph.add_conditional_edges("ai_agent", tools_condition)
         self.graph.add_edge("tools", "ai_agent")
-        self.graph.add_edge("ai_agent", END)  # safe termination when no tool_calls
+        self.graph.add_edge("ai_agent", END)
 
         self.app = self.graph.compile()
 
-    # -------------------------
-    # SIMPLE CALL (no streaming headaches)
-    # -------------------------
     def invoke(self, user_input: str) -> str:
         state = {"messages": [HumanMessage(content=user_input)]}
         out = self.app.invoke(state)
-
-        # Return last AI message content
         msgs = out.get("messages", [])
         for m in reversed(msgs):
             if getattr(m, "type", "") == "ai":
@@ -314,10 +311,3 @@ class WeatherActivityClothingAgent:
 
     def __call__(self, user_input: str) -> str:
         return self.invoke(user_input)
-
-
-# Example:
-# agent = WeatherActivityClothingAgent()
-# print(agent("what should I wear today in Cairo?"))
-# print(agent("what is machine learning?"))
-# print(agent("Barcelona vs Real Madrid score 2024 La Liga"))
