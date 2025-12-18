@@ -1,6 +1,9 @@
+
+---
+
 # Weather Activity & Clothing Assistant
 
-An LLM-powered assistant that provides **current weather**, **clothing recommendations**, and **outdoor activity suggestions** based on a user’s location. The system combines real-time weather data, retrieval-augmented generation (RAG) over a curated knowledge base, and tool-calling orchestration.
+An LLM-powered assistant that provides **current weather**, **clothing recommendations**, and **outdoor activity suggestions** based on a user’s location. The system combines real-time weather data, retrieval-augmented generation (RAG) over a curated knowledge base, and tool-calling orchestration using LangGraph.
 
 ---
 
@@ -20,8 +23,7 @@ An LLM-powered assistant that provides **current weather**, **clothing recommend
 * [Testing](#testing)
 * [Troubleshooting](#troubleshooting)
 * [Project Structure](#project-structure)
-* [Roadmap](#roadmap)
-* [License & Credits](#license--credits)
+* [License--credits](#license--credits)
 
 ---
 
@@ -36,25 +38,25 @@ This project answers user queries such as:
 It uses:
 
 * **OpenWeatherMap** for live weather conditions
-* **Groq (ChatGroq)** for LLM reasoning + tool calling
+* **Groq (ChatGroq)** for LLM + tool calling
 * **Cassandra / Astra DB via Cassio** for vector storage
 * **HuggingFace embeddings** for semantic indexing
-* **Cohere Rerank** for contextual compression / reranking
+* **Cohere Rerank** for reranking / contextual compression
 * **LangGraph** to orchestrate tool execution
-* **FastAPI** for backend endpoints (including true streaming)
-* **Streamlit** for interactive chat UI
+* **FastAPI** for backend endpoints (**non-stream + true streaming SSE**)
+* **Streamlit** for an interactive chat UI
 
 ---
 
 ## Tooling Model
 
-The assistant is designed around **exactly three tools**. The LLM is required to choose between them based on the user’s intent.
+The assistant is designed around **exactly three tools**. The LLM must select between them based on intent.
 
 ### Tool 1 — `weather_query(location: str)`
 
-* **Purpose:** Fetch real-time weather data for a country/city.
+* **Purpose:** Fetch real-time weather data for a given country/city.
 * **Source:** OpenWeatherMap API.
-* **Used when:** The user asks about weather, temperature, forecast, or anything that requires current weather context.
+* **Used when:** The user asks about weather, temperature, forecast, “what’s it like now”, or anything that needs current weather context.
 
 ### Tool 2 — `retrieve_weather_activity_clothing_info(query: str)`
 
@@ -64,20 +66,23 @@ The assistant is designed around **exactly three tools**. The LLM is required to
 
 ### Tool 3 — `internet_search(query: str)`
 
-* **Purpose:** Answer general, non-weather informational questions.
+* **Purpose:** Answer general informational questions unrelated to weather/clothing/activity.
 * **Source:** DuckDuckGo Instant Answer API (lightweight lookup).
 * **Used when:** The user asks about topics unrelated to weather/clothing/activities.
 
-> Important behavior rule: **Weather/clothing/activity requests must never use `internet_search`.**
+**Critical Routing Rule**
+
+* Weather/clothing/activity requests must **never** call `internet_search`.
+* If the user request is weather/clothing/activity-based and includes a valid location, the assistant must call `weather_query(location)` immediately.
 
 ---
 
 ## Key Features
 
-* **Tool-first weather flow:** When a valid location is provided and the request is weather/clothing/activity-related, the assistant calls `weather_query` immediately.
+* **Tool-first weather flow:** If a valid location is provided and the request is weather/clothing/activity-related, the assistant calls `weather_query` immediately.
 * **RAG-powered recommendations:** Clothing/activity guidance is retrieved from a vectorized guide and reranked for relevance.
-* **Safe location handling:** Prevents calling weather tools with placeholder locations (e.g., `"unknown"`, `"?"`, empty strings).
-* **True streaming support:** Token/event streaming via `LangGraph` `astream_events` exposed through an SSE endpoint.
+* **Safe location handling:** Prevents tool calls with invalid placeholder locations (`"unknown"`, `"?"`, `"n/a"`, empty strings).
+* **True streaming support:** Token/event streaming via LangGraph `astream_events`, exposed through a FastAPI SSE endpoint.
 * **Clean UI:** Streamlit chat bubbles, optional reasoning expander, and stable session history.
 
 ---
@@ -86,14 +91,17 @@ The assistant is designed around **exactly three tools**. The LLM is required to
 
 High-level flow:
 
-1. User sends a message (via Streamlit or API).
-2. Agent decides which tool(s) to call:
+1. User sends a message (Streamlit UI or API client).
 
-   * Weather-related requests → `weather_query(location)`
-   * Clothing/activity requests → `weather_query` → build context → `retrieve_weather_activity_clothing_info`
-   * Non-weather informational requests → `internet_search(query)`
+2. The agent routes the request:
+
+   * Weather-only → `weather_query(location)` → “Weather Snapshot”
+   * Clothing/activities → `weather_query(location)` → build weather context → `retrieve_weather_activity_clothing_info(query)`
+   * Non-weather informational → `internet_search(query)`
+
 3. Tools return results.
-4. Agent formats and returns a structured final response.
+
+4. Agent formats and returns a structured response.
 
 ---
 
@@ -107,7 +115,7 @@ High-level flow:
   * OpenWeatherMap wrapper
   * Groq LLM with tool binding
   * Cassandra vector store
-  * Retrieval tool with Cohere reranking
+  * Retriever tool with Cohere reranking
 * Builds a LangGraph state machine:
 
   * `ai_agent` node (LLM call)
@@ -117,13 +125,13 @@ High-level flow:
 ### 2) Tools
 
 * `weather_query(location: str)`
-  Fetches real-time weather data for a given country/city.
+  Fetches current weather data for a given location.
 
 * `retrieve_weather_activity_clothing_info(query: str)`
-  Retrieves clothing/activity recommendations from the knowledge base (vector search + rerank + compression).
+  Retrieves relevant clothing/activity guidance from the knowledge base via vector search + reranking.
 
 * `internet_search(query: str)`
-  Performs lightweight web lookup for **non-weather** informational questions.
+  Lightweight web lookup for general questions outside the weather/clothing/activity scope.
 
 ---
 
@@ -131,9 +139,9 @@ High-level flow:
 
 Base prefix: `/api/v1`
 
-### `POST /api/v1/chat`
+### `POST /api/v1/chat` (Non-stream)
 
-Returns a full response (non-streaming).
+Returns a full response as JSON.
 
 **Request**
 
@@ -147,12 +155,12 @@ Returns a full response (non-streaming).
 { "answer": "<reasoning>...</reasoning>\nWeather Snapshot...\n..." }
 ```
 
-### `POST /api/v1/chat/stream` (SSE)
+### `POST /api/v1/chat/stream` (SSE Streaming)
 
-True streaming endpoint. Returns events as **Server-Sent Events**:
+True streaming endpoint (Server-Sent Events). Emits incremental data frames:
 
 * `data: {"type":"status","value":"started"}`
-* `data: {"type":"delta","value":"..."}`
+* `data: {"type":"delta","value":"..."}`  (token/partial text)
 * `data: {"type":"done"}`
 * `data: {"type":"error","message":"..."}`
 
@@ -171,30 +179,53 @@ curl -N -X POST "http://localhost:8000/api/v1/chat/stream" \
 The Streamlit app is a chat interface that supports:
 
 * Session-based history
-* Streaming output in the chat bubble
+* Streaming output in the assistant chat bubble
 * Optional reasoning expander (when `<reasoning>...</reasoning>` exists)
 
-You can run Streamlit in two modes:
+### Supported Modes
 
-1. **Local agent mode** (directly imports and runs the agent)
-2. **API mode** (recommended for deployment)
+1. **API mode (recommended)**
+   Streamlit calls FastAPI endpoints:
 
-   * Calls FastAPI `/api/v1/chat/stream` for true streaming
+* `/api/v1/chat` (non-stream)
+* `/api/v1/chat/stream` (SSE streaming)
+
+2. **Local agent mode (optional)**
+   Streamlit imports and runs the agent directly (useful for local experiments).
 
 ---
 
 ## Knowledge Base & RAG Pipeline
 
-### Data Source
+### Data Sources
 
-A guide/document (PDF) containing clothing/activity recommendations across diverse weather scenarios.
+The knowledge base is built from two PDF guides that provide clothing/activity recommendations across multiple weather scenarios.
 
-### Indexing Pipeline (conceptual)
+### Extraction & Chunking (Current Implementation)
 
-* Load document content
-* Chunking strategy (weather sections)
+We use a dedicated extraction module that:
+
+* Loads PDFs via `PyMuPDF4LLMLoader`
+* Applies file-specific chunkers
+* Saves output as **JSONL** ready for ingestion/indexing
+
+**Chunkers**
+
+* `src/chunker/first_pdf_chuncker.py`
+  For the “Comprehensive Global Guide” format (`##` weather → `###` country → temperature blocks).
+
+* `src/chunker/second_pdf_chuncker.py`
+  For the bullet-style database format (`**1. Weather**` → `Country:` → `Outdoor Activities / Appropriate Clothing`).
+
+**Outputs**
+
+* Saved under: `src/data/out_chunks/*.jsonl`
+
+### Indexing Pipeline (Conceptual)
+
+* Load JSONL chunks
 * Embeddings: `sentence-transformers/all-mpnet-base-v2`
-* Vector store: Cassandra / Astra via Cassio
+* Vector store: Cassandra/Astra via Cassio
 * Retrieval:
 
   * KNN retrieval (`k = retriever_k`)
@@ -219,7 +250,7 @@ CASSIO_TOKEN=your_token
 
 Notes:
 
-* `OPENAI_API_KEY` is **not required** for the current code path unless you add OpenAI-based components later.
+* `OPENAI_API_KEY` is **not required** for the current implementation unless you add OpenAI-dependent components later.
 * Free tiers may impose rate limits.
 
 ---
@@ -267,7 +298,7 @@ curl http://localhost:8000/health
 streamlit run app.py
 ```
 
-If Streamlit uses the API server:
+API mode environment variable:
 
 ```bash
 # Linux/macOS
@@ -324,28 +355,38 @@ The agent will raise a `ValueError` if any required key is missing:
 
 ### Streamlit shows no streaming / delayed tokens
 
-* Test streaming via `curl -N` to confirm server emits SSE correctly.
-* Ensure no proxy buffers responses (common with reverse proxies).
-* Ensure the Streamlit client reads `iter_lines()` with `stream=True`.
+* Verify streaming with `curl -N` to confirm SSE works.
+* Ensure no proxy buffers responses (reverse proxies can buffer SSE).
+* Ensure the Streamlit client reads the response incrementally (`stream=True`, `iter_lines()`).
+
+### JSONL extraction produces `0 chunks`
+
+* This usually indicates a **format mismatch** between the PDF extraction text and the chunker regex.
+* Validate the extracted raw text and confirm the chunker pattern matches the real headings/markers.
 
 ---
 
 ## Project Structure
 
 ```text
-weather-chatbot-rag/
+Weather-RAG/
 ├─ app.py
-├─ agent.py                      # legacy/standalone agent (optional)
+├─ agent.py                
 ├─ src/
 │  ├─ agent/
 │  │  └─ weather_agent.py
-│  ├─ rag/
-│  │  └─ builder.py
+│  ├─ prompts/
+│  │  └─ system_prompt.py
 │  ├─ tools/
 │  │  ├─ weather.py
 │  │  └─ search.py
-│  ├─ prompts/
-│  │  └─ system_prompt.py
+│  ├─ rag/
+│  │  └─ builder.py
+│  ├─ chunker/
+│  │  ├─ first_pdf_chuncker.py
+│  │  └─ second_pdf_chuncker.py
+│  ├─ extract_text/
+│  │  └─ extract.py         
 │  └─ api/
 │     ├─ main.py
 │     └─ routes/
@@ -362,3 +403,5 @@ weather-chatbot-rag/
 
 * Built by Amgad Shalaby
 * Powered by LangChain/LangGraph, OpenWeatherMap, Groq, HuggingFace, Cassio (Astra DB), and Cohere
+
+---
