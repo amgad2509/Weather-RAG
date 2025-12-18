@@ -39,7 +39,6 @@ def startup_init_agent():
         logger.info("WeatherActivityClothingAgent initialized successfully.")
     except Exception:
         logger.exception("Failed to initialize WeatherActivityClothingAgent.")
-        # هنا الأفضل نفشل التشغيل بدل ما يشتغل API بدون Agent
         raise
 
 @app.get("/health")
