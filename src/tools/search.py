@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 def internet_search(query: str, max_related: int = 6) -> str:
     """
     Lightweight web lookup via DuckDuckGo Instant Answer API.
+    Best-effort for quick facts, definitions, entities.
     Returns a compact summary + a few source links when available.
     """
     if not query or not query.strip():
