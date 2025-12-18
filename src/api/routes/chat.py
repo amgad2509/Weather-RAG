@@ -1,92 +1,167 @@
+# # src/api/routes/chat.py
+# from __future__ import annotations
+
+# import logging
+# from fastapi import APIRouter, HTTPException, Request
+
+# from src.api.routes.module.schema import AgentRequest, AgentResponse
+# from src.agent.weather_agent import WeatherActivityClothingAgent
+
+# logger = logging.getLogger(__name__)
+# ai_agent_router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+# def get_agent(request: Request):
+#     agent = getattr(request.app.state, "weather_agent", None)
+#     if agent is None:
+#         request.app.state.weather_agent = WeatherActivityClothingAgent()
+#         agent = request.app.state.weather_agent
+#     return agent
+
+
+# @ai_agent_router.post("", response_model=AgentResponse)
+# def chat(req: AgentRequest, request: Request) -> AgentResponse:
+#     try:
+#         agent = get_agent(request)
+#         answer = agent.invoke(req.message)
+
+#         if not isinstance(answer, str) or not answer.strip():
+#             raise HTTPException(status_code=500, detail="Agent returned empty answer")
+
+#         return AgentResponse(answer=answer)
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.exception("Chat endpoint failed")
+#         raise HTTPException(status_code=500, detail=str(e))
+
 # src/api/routes/chat.py
+from __future__ import annotations
 
-import re
-import time
-import asyncio
-from functools import lru_cache
-from typing import List
+import json
+import logging
+from typing import AsyncGenerator
 
-from fastapi import HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage
 
-from src.api.routes.base_route import router
-from src.api.routes.module.schema import ChatRequest, ChatResponse, SourceItem, LatencyMs, Tokens
-
-# IMPORTANT: عدّل الاستيراد ده حسب مكان الـ Agent عندك فعليًا
-# لو عندك: src/agent/weather_agent.py وفيه WeatherActivityClothingAgent
+from src.api.routes.module.schema import AgentRequest, AgentResponse
 from src.agent.weather_agent import WeatherActivityClothingAgent
 
-
-@lru_cache(maxsize=1)
-def get_agent() -> WeatherActivityClothingAgent:
-    # singleton (عشان الـ init تقيل)
-    return WeatherActivityClothingAgent()
+logger = logging.getLogger(__name__)
+ai_agent_router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-_URL_RE = re.compile(r"(https?://[^\s)]+)")
+def get_agent(request: Request) -> WeatherActivityClothingAgent:
+    agent = getattr(request.app.state, "weather_agent", None)
+    if agent is None:
+        request.app.state.weather_agent = WeatherActivityClothingAgent()
+        agent = request.app.state.weather_agent
+    return agent
 
 
-def _build_langchain_messages(req: ChatRequest):
-    msgs = []
-    for h in req.history or []:
-        if h.role == "user":
-            msgs.append(HumanMessage(content=h.content))
-        else:
-            msgs.append(AIMessage(content=h.content))
-    msgs.append(HumanMessage(content=req.message))
-    return msgs
+def _sse(data: dict) -> str:
+    # Server-Sent Events (SSE): each message is "data: <json>\n\n"
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _extract_sources_from_tool_outputs(messages) -> List[SourceItem]:
-    # best-effort: استخراج أي URLs من ToolMessage outputs (أو أي message content)
-    sources = []
-    seen = set()
-    for m in messages or []:
-        content = getattr(m, "content", "") or ""
-        for url in _URL_RE.findall(content):
-            if url in seen:
-                continue
-            seen.add(url)
-            sources.append(SourceItem(name="source", url=url))
-    return sources
-
-
-@router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
-    t0 = time.perf_counter()
-    by_step = {}
-
+@ai_agent_router.post("", response_model=AgentResponse)
+def chat(req: AgentRequest, request: Request) -> AgentResponse:
     try:
-        agent = get_agent()
+        agent = get_agent(request)
+        answer = agent.invoke(req.message)
 
-        msgs = _build_langchain_messages(req)
-        payload = {"messages": msgs}
+        if not isinstance(answer, str) or not answer.strip():
+            raise HTTPException(status_code=500, detail="Agent returned empty answer")
 
-        t1 = time.perf_counter()
-        if hasattr(agent.app, "ainvoke"):
-            out = await agent.app.ainvoke(payload)
-        else:
-            out = await asyncio.to_thread(agent.app.invoke, payload)
-        by_step["agent_invoke"] = int((time.perf_counter() - t1) * 1000)
+        return AgentResponse(answer=answer)
 
-        messages = out.get("messages", []) if isinstance(out, dict) else []
-        answer = ""
-        for m in reversed(messages):
-            if getattr(m, "type", "") == "ai":
-                answer = getattr(m, "content", "") or ""
-                break
-
-        sources = _extract_sources_from_tool_outputs(messages)
-
-        total_ms = int((time.perf_counter() - t0) * 1000)
-
-        return ChatResponse(
-            answer=answer,
-            sources=sources,
-            latency_ms=LatencyMs(total=total_ms, by_step=by_step),
-            tokens=Tokens(prompt=0, completion=0),
-        )
-
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception("Chat endpoint failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@ai_agent_router.post("/stream")
+async def chat_stream(req: AgentRequest, request: Request):
+    """
+    True token/event streaming via LangGraph astream_events (when available).
+    SSE events:
+      - {"type":"status","value":"started"}
+      - {"type":"delta","value":"..."}  (token/chunk deltas)
+      - {"type":"done"}
+      - {"type":"error","message":"..."}
+    """
+    agent = get_agent(request)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        try:
+            yield _sse({"type": "status", "value": "started"})
+
+            # Preferred: true token streaming from graph
+            if hasattr(agent.app, "astream_events"):
+                async for ev in agent.app.astream_events(
+                    {"messages": [HumanMessage(content=req.message)]},
+                    version="v2",
+                ):
+                    # Stop if client disconnected
+                    if await request.is_disconnected():
+                        return
+
+                    et = ev.get("event", "")
+                    data = ev.get("data", {}) or {}
+
+                    if et == "on_chat_model_stream":
+                        chunk = data.get("chunk")
+                        piece = ""
+                        try:
+                            piece = getattr(chunk, "content", "") or ""
+                            if isinstance(piece, list):
+                                piece = "".join(
+                                    [p.get("text", "") if isinstance(p, dict) else str(p) for p in piece]
+                                )
+                            piece = str(piece)
+                        except Exception:
+                            piece = ""
+
+                        if piece:
+                            yield _sse({"type": "delta", "value": piece})
+
+                    elif et == "on_tool_start":
+                        # log only (do not stream tool info to client)
+                        name = ev.get("name", "tool")
+                        tool_in = data.get("input")
+                        logger.info("TOOL_CALL -> %s | args=%s", name, tool_in)
+
+                    elif et == "on_tool_end":
+                        name = ev.get("name", "tool")
+                        tool_out = data.get("output")
+                        logger.info("TOOL_RESULT <- %s | output=%s", name, tool_out)
+
+                yield _sse({"type": "done"})
+                return
+
+            # Fallback: no events support (stream as one delta)
+            logger.warning("astream_events not available; falling back to non-stream.")
+            answer = agent.invoke(req.message)
+            if answer:
+                yield _sse({"type": "delta", "value": str(answer)})
+            yield _sse({"type": "done"})
+
+        except Exception as e:
+            logger.exception("Chat stream failed")
+            yield _sse({"type": "error", "message": str(e)})
+            yield _sse({"type": "done"})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
