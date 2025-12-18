@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes.base_route import base_router
 from src.agent.weather_agent import WeatherActivityClothingAgent
+from src.api.tracing_logger import setup_tracing_logger
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ def startup_init_agent():
     """
     try:
         app.state.weather_agent = WeatherActivityClothingAgent()
+        app.state.tracing = setup_tracing_logger("tracing.log")
         logger.info("WeatherActivityClothingAgent initialized successfully.")
     except Exception:
         logger.exception("Failed to initialize WeatherActivityClothingAgent.")
