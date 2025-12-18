@@ -26,7 +26,7 @@ class WeatherActivityClothingAgent:
         retriever_k: int = 8,
         rerank_top_n: int = 4,
         rerank_model: str = "rerank-english-v3.0",
-        groq_model: str = "openai/gpt-oss-20b",
+        groq_model: str = "openai/gpt-oss-120b",
     ):
         # -------------------------
         # ENV / KEYS
