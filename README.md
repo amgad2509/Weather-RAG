@@ -5,25 +5,30 @@
 
 An LLM-powered assistant that provides **current weather**, **clothing recommendations**, and **outdoor activity suggestions** based on a user’s location. The system combines real-time weather data, retrieval-augmented generation (RAG) over a curated knowledge base, and tool-calling orchestration using LangGraph.
 
+![Workflow](assets/flow.png)
+
+**Demo:** [assets/RAG_Weather_Applab.mp4](assets/RAG_Weather_Applab.mp4)
+
 ---
 
 ## Table of Contents
 
-* [Overview](#overview)
-* [Tooling Model](#tooling-model)
-* [Key Features](#key-features)
-* [Architecture](#architecture)
-* [Core Components](#core-components)
-* [API](#api)
-* [Streamlit UI](#streamlit-ui)
-* [Knowledge Base & RAG Pipeline](#knowledge-base--rag-pipeline)
-* [Configuration](#configuration)
-* [Installation](#installation)
-* [Run](#run)
-* [Testing](#testing)
-* [Troubleshooting](#troubleshooting)
-* [Project Structure](#project-structure)
-* [License--credits](#license--credits)
+- [Overview](#overview)
+- [Tooling Model](#tooling-model)
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+- [Core Components](#core-components)
+- [API](#api)
+- [Tracing & Metrics](#tracing--metrics)
+- [Streamlit UI](#streamlit-ui)
+- [Knowledge Base & RAG Pipeline](#knowledge-base--rag-pipeline)
+- [Configuration](#configuration)
+- [Installation](#installation)
+- [Run](#run)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [License & Credits](#license--credits)
 
 ---
 
@@ -31,20 +36,20 @@ An LLM-powered assistant that provides **current weather**, **clothing recommend
 
 This project answers user queries such as:
 
-* “What’s the weather now in Cairo?”
-* “What should I wear today in Egypt?”
-* “What outdoor activities are suitable in London right now?”
+- “What’s the weather now in Cairo?”
+- “What should I wear today in Egypt?”
+- “What outdoor activities are suitable in London right now?”
 
 It uses:
 
-* **OpenWeatherMap** for live weather conditions
-* **Groq (ChatGroq)** for LLM + tool calling
-* **Cassandra / Astra DB via Cassio** for vector storage
-* **HuggingFace embeddings** for semantic indexing
-* **Cohere Rerank** for reranking / contextual compression
-* **LangGraph** to orchestrate tool execution
-* **FastAPI** for backend endpoints (**non-stream + true streaming SSE**)
-* **Streamlit** for an interactive chat UI
+- **OpenWeatherMap** for live weather conditions
+- **Groq (ChatGroq)** for LLM + tool calling
+- **Cassandra / Astra DB via Cassio** for vector storage
+- **HuggingFace embeddings** for semantic indexing
+- **Cohere Rerank** for reranking / contextual compression
+- **LangGraph** to orchestrate tool execution
+- **FastAPI** for backend endpoints (**non-stream + true streaming SSE**)
+- **Streamlit** for an interactive chat UI
 
 ---
 
@@ -54,36 +59,37 @@ The assistant is designed around **exactly three tools**. The LLM must select be
 
 ### Tool 1 — `weather_query(location: str)`
 
-* **Purpose:** Fetch real-time weather data for a given country/city.
-* **Source:** OpenWeatherMap API.
-* **Used when:** The user asks about weather, temperature, forecast, “what’s it like now”, or anything that needs current weather context.
+- **Purpose:** Fetch real-time weather data for a given country/city.
+- **Source:** OpenWeatherMap API.
+- **Used when:** The user asks about weather, temperature, forecast, “what’s it like now”, or anything that needs current weather context.
 
 ### Tool 2 — `retrieve_weather_activity_clothing_info(query: str)`
 
-* **Purpose:** Retrieve clothing and activity recommendations from the vector knowledge base.
-* **Source:** Cassandra/Astra vector store (Cassio) with embeddings + Cohere reranking.
-* **Used when:** The user asks what to wear and/or what activities are suitable **based on weather**.
+- **Purpose:** Retrieve clothing and activity recommendations from the vector knowledge base.
+- **Source:** Cassandra/Astra vector store (Cassio) with embeddings + Cohere reranking.
+- **Used when:** The user asks what to wear and/or what activities are suitable **based on weather**.
 
 ### Tool 3 — `internet_search(query: str)`
 
-* **Purpose:** Answer general informational questions unrelated to weather/clothing/activity.
-* **Source:** DuckDuckGo Instant Answer API (lightweight lookup).
-* **Used when:** The user asks about topics unrelated to weather/clothing/activities.
+- **Purpose:** Answer general informational questions unrelated to weather/clothing/activity.
+- **Source:** DuckDuckGo Instant Answer API (lightweight lookup).
+- **Used when:** The user asks about topics unrelated to weather/clothing/activities.
 
 **Critical Routing Rule**
 
-* Weather/clothing/activity requests must **never** call `internet_search`.
-* If the user request is weather/clothing/activity-based and includes a valid location, the assistant must call `weather_query(location)` immediately.
+- Weather/clothing/activity requests must **never** call `internet_search`.
+- If the user request is weather/clothing/activity-based and includes a valid location, the assistant must call `weather_query(location)` immediately.
 
 ---
 
 ## Key Features
 
-* **Tool-first weather flow:** If a valid location is provided and the request is weather/clothing/activity-related, the assistant calls `weather_query` immediately.
-* **RAG-powered recommendations:** Clothing/activity guidance is retrieved from a vectorized guide and reranked for relevance.
-* **Safe location handling:** Prevents tool calls with invalid placeholder locations (`"unknown"`, `"?"`, `"n/a"`, empty strings).
-* **True streaming support:** Token/event streaming via LangGraph `astream_events`, exposed through a FastAPI SSE endpoint.
-* **Clean UI:** Streamlit chat bubbles, optional reasoning expander, and stable session history.
+- **Tool-first weather flow:** If a valid location is provided and the request is weather/clothing/activity-related, the assistant calls `weather_query` immediately.
+- **RAG-powered recommendations:** Clothing/activity guidance is retrieved from a vectorized guide and reranked for relevance.
+- **Safe location handling:** Prevents tool calls with invalid placeholder locations (`"unknown"`, `"?"`, `"n/a"`, empty strings).
+- **True streaming support:** Token/event streaming via LangGraph `astream_events`, exposed through a FastAPI SSE endpoint.
+- **Structured JSON responses:** A production-minded endpoint returns a structured payload: `answer`, `sources`, `latency_ms`, `tokens`.
+- **Clean UI:** Streamlit chat bubbles, optional reasoning expander, and stable session history.
 
 ---
 
@@ -92,16 +98,12 @@ The assistant is designed around **exactly three tools**. The LLM must select be
 High-level flow:
 
 1. User sends a message (Streamlit UI or API client).
-
 2. The agent routes the request:
-
-   * Weather-only → `weather_query(location)` → “Weather Snapshot”
-   * Clothing/activities → `weather_query(location)` → build weather context → `retrieve_weather_activity_clothing_info(query)`
-   * Non-weather informational → `internet_search(query)`
-
+   - Weather-only → `weather_query(location)` → “Weather Snapshot”
+   - Clothing/activities → `weather_query(location)` → build weather context → `retrieve_weather_activity_clothing_info(query)`
+   - Non-weather informational → `internet_search(query)`
 3. Tools return results.
-
-4. Agent formats and returns a structured response.
+4. Agent formats and returns a structured response (and/or streams deltas over SSE).
 
 ---
 
@@ -109,29 +111,31 @@ High-level flow:
 
 ### 1) Agent (`WeatherActivityClothingAgent`)
 
-* Loads environment variables from `.env`
-* Initializes:
-
-  * OpenWeatherMap wrapper
-  * Groq LLM with tool binding
-  * Cassandra vector store
-  * Retriever tool with Cohere reranking
-* Builds a LangGraph state machine:
-
-  * `ai_agent` node (LLM call)
-  * `tools` node (executes tool calls)
-  * Conditional routing via `tools_condition`
+- Loads environment variables from `.env`
+- Initializes:
+  - OpenWeatherMap wrapper
+  - Groq LLM with tool binding
+  - Cassandra vector store
+  - Retriever tool with Cohere reranking
+- Builds a LangGraph state machine:
+  - `ai_agent` node (LLM call)
+  - `tools` node (executes tool calls)
+  - Conditional routing via `tools_condition`
 
 ### 2) Tools
 
-* `weather_query(location: str)`
+- `weather_query(location: str)`  
   Fetches current weather data for a given location.
 
-* `retrieve_weather_activity_clothing_info(query: str)`
+- `retrieve_weather_activity_clothing_info(query: str)`  
   Retrieves relevant clothing/activity guidance from the knowledge base via vector search + reranking.
 
-* `internet_search(query: str)`
+- `internet_search(query: str)`  
   Lightweight web lookup for general questions outside the weather/clothing/activity scope.
+
+### 3) Schemas
+
+Tool schemas are modeled using Pydantic (e.g., `args_schema=...`) to ensure structured I/O for tool calls and predictable inputs.
 
 ---
 
@@ -139,9 +143,18 @@ High-level flow:
 
 Base prefix: `/api/v1`
 
-### `POST /api/v1/chat` (Non-stream)
+### `POST /api/v1/chat` (Structured JSON)
 
-Returns a full response as JSON.
+Returns the **final structured JSON** required by agentic QA specs:
+
+```json
+{
+  "answer": "string",
+  "sources": [{"name":"string","url":"string"}],
+  "latency_ms": {"total": 123, "by_step": {"retrieve": 45, "llm": 60}},
+  "tokens": {"prompt": 0, "completion": 0}
+}
+````
 
 **Request**
 
@@ -149,11 +162,15 @@ Returns a full response as JSON.
 { "message": "What should I wear today in Egypt?" }
 ```
 
-**Response**
+**Example curl**
 
-```json
-{ "answer": "<reasoning>...</reasoning>\nWeather Snapshot...\n..." }
+```bash
+curl -s -X POST "http://localhost:8000/api/v1/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"What should I wear today in Egypt?"}' | jq
 ```
+
+---
 
 ### `POST /api/v1/chat/stream` (SSE Streaming)
 
@@ -174,6 +191,41 @@ curl -N -X POST "http://localhost:8000/api/v1/chat/stream" \
 
 ---
 
+## Tracing & Metrics
+
+The service emits tracing in **two places**:
+
+1. **stdout** JSON logs (for easy local debugging / container logs)
+2. **`tracing.log`** (JSONL file) for persistent request-level and tool-level traces
+
+### What gets traced
+
+* request_received (route, client_host, user_agent, input length preview)
+* stream_started / stream_done
+* tool_start / tool_end (tool name, latency, previews)
+* stream_error (with error message)
+* client_disconnected (for SSE)
+
+### File output
+
+By default, tracing is written to:
+
+* `tracing.log`
+
+You can override the path using an environment variable:
+
+```bash
+# Linux/macOS
+export TRACING_LOG_PATH="tracing.log"
+
+# Windows PowerShell
+$env:TRACING_LOG_PATH="tracing.log"
+```
+
+The file format is JSON Lines (one JSON object per line), suitable for `jq`, ingestion into ELK, etc.
+
+---
+
 ## Streamlit UI
 
 The Streamlit app is a chat interface that supports:
@@ -187,8 +239,8 @@ The Streamlit app is a chat interface that supports:
 1. **API mode (recommended)**
    Streamlit calls FastAPI endpoints:
 
-* `/api/v1/chat` (non-stream)
-* `/api/v1/chat/stream` (SSE streaming)
+   * `/api/v1/chat` (structured non-stream)
+   * `/api/v1/chat/stream` (SSE streaming)
 
 2. **Local agent mode (optional)**
    Streamlit imports and runs the agent directly (useful for local experiments).
@@ -220,17 +272,6 @@ We use a dedicated extraction module that:
 **Outputs**
 
 * Saved under: `src/data/out_chunks/*.jsonl`
-
-### Indexing Pipeline (Conceptual)
-
-* Load JSONL chunks
-* Embeddings: `sentence-transformers/all-mpnet-base-v2`
-* Vector store: Cassandra/Astra via Cassio
-* Retrieval:
-
-  * KNN retrieval (`k = retriever_k`)
-  * Cohere reranking (`top_n = rerank_top_n`)
-  * Contextual compression retriever
 
 ---
 
@@ -289,7 +330,7 @@ python -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
 Health check:
 
 ```bash
-curl http://localhost:8000/health
+curl -s "http://localhost:8000/health"
 ```
 
 ### 2) Run Streamlit
@@ -317,15 +358,15 @@ Quick functional checks:
 
 1. Weather query:
 
-* “What’s the weather now in Doha?”
+   * “What’s the weather now in Doha?”
 
 2. Clothing + activities:
 
-* “What should I wear today in Cairo? What can I do outside?”
+   * “What should I wear today in Cairo? What can I do outside?”
 
 3. Non-weather informational question:
 
-* “What is machine learning?”
+   * “What is machine learning?”
 
 Streaming check:
 
@@ -371,7 +412,10 @@ The agent will raise a `ValueError` if any required key is missing:
 ```text
 Weather-RAG/
 ├─ app.py
-├─ agent.py                
+├─ agent.py
+├─ assets/
+│  ├─ flow.png
+│  └─ RAG_Weather_Applab.mp4
 ├─ src/
 │  ├─ agent/
 │  │  └─ weather_agent.py
@@ -380,13 +424,15 @@ Weather-RAG/
 │  ├─ tools/
 │  │  ├─ weather.py
 │  │  └─ search.py
+│  ├─ schema/
+│  │  └─ (pydantic tool schemas)
 │  ├─ rag/
 │  │  └─ builder.py
 │  ├─ chunker/
 │  │  ├─ first_pdf_chuncker.py
 │  │  └─ second_pdf_chuncker.py
 │  ├─ extract_text/
-│  │  └─ extract.py         
+│  │  └─ extract.py
 │  └─ api/
 │     ├─ main.py
 │     └─ routes/
