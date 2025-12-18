@@ -18,3 +18,5 @@ torch
 transformers
 pyowm
 "fastapi[standard]"
+pymupdf4llm
+langchain-text-splitters
