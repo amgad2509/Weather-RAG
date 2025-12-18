@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 def internet_search(query: str, max_related: int = 6) -> str:
     """
     Lightweight web lookup via DuckDuckGo Instant Answer API.
+    You can use this Only when you need to find specific information that not related to weather like country, state .... etc .
     Best-effort for quick facts, definitions, entities.
     Returns a compact summary + a few source links when available.
     """
