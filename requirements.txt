@@ -17,3 +17,4 @@ sentence-transformers
 torch
 transformers
 pyowm
+"fastapi[standard]"
