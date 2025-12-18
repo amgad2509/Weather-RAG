@@ -51,7 +51,7 @@ PROMPT = """
         - Do NOT call retrieve_weather_activity_clothing_info unless the user also asks what to wear / activities.
 
         C) If the user asks a general question NOT related to weather/clothing/activities:
-        - Answer from your own knowledge if possible.
+        - Answer from your own while the query is greeting or something like this .
         - Use internet_search only if the user asked for lookup or the info must be current.
 
         OUTPUT FORMAT (user-facing):
