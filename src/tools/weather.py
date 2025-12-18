@@ -1,10 +1,11 @@
 from langchain_core.tools import tool
+from src.schema import WeatherQueryInput
 
 _BAD_LOCATIONS = {"?", "unknown", "n/a", "na", "none", "null", ""}
 
 
 def make_weather_query_tool(weather_wrapper):
-    @tool
+    @tool(args_schema=WeatherQueryInput)
     def weather_query(location: str) -> str:
         """
         Fetches real-time weather data for a specified location using OpenWeatherMap API.

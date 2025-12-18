@@ -1,9 +1,10 @@
+# src/tools/internet_search.py
 import requests
 from urllib.parse import urlencode
 from langchain_core.tools import tool
+from src.schema import InternetSearchInput
 
-
-@tool
+@tool(args_schema=InternetSearchInput)
 def internet_search(query: str, max_related: int = 6) -> str:
     """
     Lightweight web lookup via DuckDuckGo Instant Answer API.
