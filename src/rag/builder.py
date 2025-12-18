@@ -36,7 +36,10 @@ def build_retriever_tool(
         compression_retriever,
         name="retrieve_weather_activity_clothing_info",
         description=(
-            "Retrieves contextually relevant and compressed info about recommended outdoor activities "
-            "and appropriate clothing based on weather conditions and location."
+        "This tool retrieves contextually relevant and compressed information about recommended outdoor activities "
+        "and appropriate clothing based on current weather conditions and location. "
+        "It leverages a comprehensive global guide covering multiple weather scenarios—such as sunny, rainy, snowy, "
+        "windy, cloudy, hot, and cold conditions—tailored for diverse countries including Egypt, UK, USA, Japan, and Australia. "
+        "The recommendations ensure users get personalized, climate-specific advice for comfort and safety during outdoor plans."
         ),
     )
