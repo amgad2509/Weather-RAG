@@ -22,6 +22,7 @@ dependencies = [
     "pyasyncore>=1.0.4",
     "pymupdf4llm>=0.2.7",
     "pyowm>=3.5.0",
+    "pytest>=9.0.2",
     "requests>=2.32.5",
     "sentence-transformers>=5.2.0",
     "streamlit>=1.52.1",
