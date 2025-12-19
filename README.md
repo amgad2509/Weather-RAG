@@ -7,7 +7,7 @@ An LLM-powered assistant that provides **current weather**, **clothing recommend
 
 ![Workflow](assets/flow.png)
 
-**Demo:** [assets/RAG_Weather_Applab.mp4](assets/RAG_Weather_Applab.mp4)
+**Demo:** [assets/RAG_Weather_Applab.mp4](assets/RAG_Weather_Demo)
 
 ---
 
@@ -351,6 +351,61 @@ streamlit run app.py
 ```
 
 ---
+
+## Using Docker
+
+Run the full stack (FastAPI API + Streamlit UI) with Docker Compose.
+
+### 1) Prepare `.env`
+
+Create a `.env` file in the project root (next to `docker-compose.yml`) and set required variables:
+
+```env
+GROQ_API_KEY=your_key
+OPENWEATHERMAP_API_KEY=your_key
+COHERE_API_KEY=your_key
+CASSIO_DB_ID=your_db_id
+CASSIO_TOKEN=your_token
+
+# optional
+TRACING_LOG_PATH=tracing.log
+```
+
+### 2) Important: `API_BASE_URL` inside Docker
+
+If Streamlit is running **inside Docker**, it must call the API container using the compose service name:
+
+```env
+API_BASE_URL=http://api:8000
+```
+
+If you run Streamlit **locally** (outside Docker), use:
+
+```env
+API_BASE_URL=http://localhost:8000
+```
+
+### 3) Build & Run
+
+```bash
+docker compose up --build
+```
+
+### 4) URLs
+
+* API: `http://localhost:8000`
+* Swagger UI: `http://localhost:8000/docs`
+* Health: `http://localhost:8000/health`
+* Streamlit UI: `http://localhost:8501`
+
+### 5) Stop
+
+```bash
+docker compose down
+```
+
+---
+
 
 ## Testing
 
