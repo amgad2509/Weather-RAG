@@ -1,16 +1,22 @@
 # src/tools/internet_search.py
+import os
 import requests
+import time
+import threading
 from urllib.parse import urlencode
 from langchain_core.tools import tool
 from src.schema import InternetSearchInput
+
+# simple semaphore to cap concurrent network calls
+_SEARCH_CONCURRENCY = int((os.getenv("SEARCH_MAX_CONCURRENCY") or 3))
+_SEARCH_SEM = threading.Semaphore(_SEARCH_CONCURRENCY if _SEARCH_CONCURRENCY > 0 else 3)
 
 @tool(args_schema=InternetSearchInput)
 def internet_search(query: str, max_related: int = 6) -> str:
     """
     Lightweight web lookup via DuckDuckGo Instant Answer API.
-    You can use this Only when you need to find specific information that not related to weather like country, state .... etc .
     Best-effort for quick facts, definitions, entities.
-    Returns a compact summary + a few source links when available.
+    Includes simple retries, timeouts, and a concurrency cap.
     """
     if not query or not query.strip():
         return "Error: empty query."
@@ -23,25 +29,40 @@ def internet_search(query: str, max_related: int = 6) -> str:
         "no_redirect": 1,
         "skip_disambig": 1,
     }
+    url = f"{base_url}?{urlencode(params)}"
 
-    try:
-        url = f"{base_url}?{urlencode(params)}"
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except requests.RequestException as e:
-        return f"Internet lookup failed (network/http): {e}"
-    except ValueError:
-        return "Internet lookup failed: response was not valid JSON."
+    attempts = 3
+    backoff = 1.0
+    resp_data = None
+    err_msg = ""
 
-    heading = (data.get("Heading") or "").strip()
-    abstract = (data.get("AbstractText") or data.get("Abstract") or "").strip()
-    answer = (data.get("Answer") or "").strip()
-    definition = (data.get("Definition") or "").strip()
-    abstract_url = (data.get("AbstractURL") or "").strip()
+    with _SEARCH_SEM:
+        for i in range(attempts):
+            try:
+                r = requests.get(url, timeout=10)
+                r.raise_for_status()
+                resp_data = r.json()
+                break
+            except requests.RequestException as e:
+                err_msg = f"Internet lookup failed (network/http): {e}"
+            except ValueError:
+                err_msg = "Internet lookup failed: response was not valid JSON."
+
+            if i < attempts - 1:
+                time.sleep(backoff)
+                backoff *= 2
+
+    if resp_data is None:
+        return err_msg or "Internet lookup failed after retries."
+
+    heading = (resp_data.get("Heading") or "").strip()
+    abstract = (resp_data.get("AbstractText") or resp_data.get("Abstract") or "").strip()
+    answer = (resp_data.get("Answer") or "").strip()
+    definition = (resp_data.get("Definition") or "").strip()
+    abstract_url = (resp_data.get("AbstractURL") or "").strip()
 
     related_texts = []
-    related = data.get("RelatedTopics") or []
+    related = resp_data.get("RelatedTopics") or []
     for item in related:
         if isinstance(item, dict) and "Topics" in item and isinstance(item["Topics"], list):
             for t in item["Topics"]:
