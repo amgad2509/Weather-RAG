@@ -3,93 +3,27 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, List, Set
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 
-from src.api.routes.module.schema import AgentRequest, AgentResponse
-from src.agent.weather_agent import WeatherActivityClothingAgent
+from src.api.schemas import AgentRequest, AgentResponse, QAResponse
+from src.api.dependencies import get_agent
 from src.utils.telemetry import emit, Stopwatch, _truncate  # noqa
+from src.api.tracing_logger import (
+    emit_trace,
+    parse_sources_from_internet_output,
+    parse_sources_from_retriever_output,
+    sse,
+)
 
 logger = logging.getLogger(__name__)
 ai_agent_router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-# -------------------------
-# Helpers
-# -------------------------
-def _json_dumps(obj: Any) -> str:
-    # Safe JSON serialization for logs/SSE
-    return json.dumps(obj, ensure_ascii=False, default=str)
-
-
-# -------------------------
-# Tracing -> file (JSONL)
-# -------------------------
-TRACING_LOG_PATH = os.getenv("TRACING_LOG_PATH", "tracing.log")
-
-_tracing_file_logger = logging.getLogger("tracing.file")
-_tracing_file_logger.setLevel(logging.INFO)
-_tracing_file_logger.propagate = False
-
-if not _tracing_file_logger.handlers:
-    log_file = Path(TRACING_LOG_PATH)
-    # if user passes a path with folders, create them
-    if str(log_file.parent) not in ("", "."):
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(logging.Formatter("%(message)s"))  # write JSON only
-    _tracing_file_logger.addHandler(fh)
-
-
-def _now_iso_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def emit_trace(event: str, **fields: Any) -> None:
-    """
-    Emits tracing twice:
-      1) stdout/normal logs via existing `emit(...)`
-      2) writes JSONL line to tracing.log (or TRACING_LOG_PATH)
-    """
-    payload = {"ts": _now_iso_utc(), "event": event, **fields}
-
-    # (1) Existing stdout JSON logs
-    try:
-        emit(event, **fields)
-    except Exception:
-        try:
-            logger.info(_json_dumps(payload))
-        except Exception:
-            pass
-
-    # (2) File JSONL
-    try:
-        _tracing_file_logger.info(_json_dumps(payload))
-    except Exception:
-        # Never break request if file logging fails
-        pass
-
-
-def _sse(payload: Dict[str, Any]) -> str:
-    # Keep it exactly SSE format
-    return f"data: {_json_dumps(payload)}\n\n"
-
-
-def get_agent(request: Request):
-    agent = getattr(request.app.state, "weather_agent", None)
-    if agent is None:
-        request.app.state.weather_agent = WeatherActivityClothingAgent()
-        agent = request.app.state.weather_agent
-    return agent
 
 
 # -------------------------
@@ -119,8 +53,8 @@ def chat(req: AgentRequest, request: Request) -> AgentResponse:
 # -------------------------
 # Required structured JSON output endpoint
 # -------------------------
-@ai_agent_router.post("/qa")
-def chat_qa(req: AgentRequest, request: Request) -> Dict[str, Any]:
+@ai_agent_router.post("/qa", response_model=QAResponse)
+def chat_qa(req: AgentRequest, request: Request) -> QAResponse:
     """
     Returns the required final structured JSON output (non-streaming):
 
@@ -155,19 +89,21 @@ def chat_qa(req: AgentRequest, request: Request) -> Dict[str, Any]:
     )
 
     try:
-        answer = agent.invoke(req.message)
+        answer, sources, metrics = agent.invoke_with_sources(req.message)
 
         if not isinstance(answer, str) or not answer.strip():
             raise HTTPException(status_code=500, detail="Agent returned empty answer")
 
-        total_ms = sw_total.ms()
+        total_ms = metrics.get("total_ms", sw_total.ms())
+        retrieve_ms = metrics.get("retrieve_ms", 0)
+        llm_ms = metrics.get("llm_ms", total_ms if retrieve_ms == 0 else max(total_ms - retrieve_ms, 0))
 
         payload: Dict[str, Any] = {
             "answer": answer,
-            "sources": [],
+            "sources": sources or [],
             "latency_ms": {
                 "total": total_ms,
-                "by_step": {"retrieve": 0, "llm": total_ms},
+                "by_step": {"retrieve": retrieve_ms, "llm": llm_ms},
             },
             "tokens": {"prompt": 0, "completion": 0},
         }
@@ -177,10 +113,10 @@ def chat_qa(req: AgentRequest, request: Request) -> Dict[str, Any]:
             trace_id=trace_id,
             status="ok",
             latency_ms=total_ms,
-            sources_count=0,
+            sources_count=len(sources or []),
         )
 
-        return payload
+        return QAResponse.model_validate(payload)
 
     except HTTPException:
         emit_trace(
@@ -240,10 +176,13 @@ async def chat_stream(req: AgentRequest, request: Request):
         delta_chars = 0
         deltas_count = 0
         tool_timers: Dict[str, Stopwatch] = {}
+        sources: List[Dict[str, str]] = []
+        sources_seen: Set[str] = set()
+        retriever_added = 0
 
         try:
             emit_trace("stream_started", trace_id=trace_id)
-            yield _sse({"type": "status", "value": "started"})
+            yield sse({"type": "status", "value": "started"})
 
             if hasattr(agent.app, "astream_events"):
                 async for ev in agent.app.astream_events(
@@ -280,11 +219,11 @@ async def chat_stream(req: AgentRequest, request: Request):
                         if piece:
                             deltas_count += 1
                             delta_chars += len(piece)
-                            yield _sse({"type": "delta", "value": piece})
+                            yield sse({"type": "delta", "value": piece})
 
                     elif et == "on_tool_start":
                         tool_calls_count += 1
-                        name = ev.get("name", "tool")
+                        name = ev.get("name") or data.get("name") or "tool"
                         tool_in = data.get("input")
 
                         tool_timers[name] = Stopwatch()
@@ -298,11 +237,30 @@ async def chat_stream(req: AgentRequest, request: Request):
                         )
 
                     elif et == "on_tool_end":
-                        name = ev.get("name", "tool")
+                        name = ev.get("name") or data.get("name") or "tool"
                         tool_out = data.get("output")
 
                         timer = tool_timers.pop(name, None)
                         tool_ms = timer.ms() if timer else None
+
+                        if name == "internet_search":
+                            normalized = tool_out
+                            if isinstance(tool_out, list):
+                                normalized = "".join(str(p) for p in tool_out)
+                            if normalized:
+                                for s in parse_sources_from_internet_output(str(normalized)):
+                                    url = s.get("url")
+                                    if url and url not in sources_seen:
+                                        sources.append(s)
+                                        sources_seen.add(url)
+                        elif name == "retrieve_weather_activity_clothing_info":
+                            if retriever_added < 2:
+                                for s in parse_sources_from_retriever_output(tool_out, limit=2 - retriever_added):
+                                    url = s.get("url")
+                                    if url and url not in sources_seen and retriever_added < 2:
+                                        sources.append(s)
+                                        sources_seen.add(url)
+                                        retriever_added += 1
 
                         emit_trace(
                             "tool_end",
@@ -312,7 +270,7 @@ async def chat_stream(req: AgentRequest, request: Request):
                             output_preview=_truncate(tool_out, 320),
                         )
 
-                yield _sse({"type": "done"})
+                yield sse({"type": "done", "sources": sources})
                 emit_trace(
                     "stream_done",
                     trace_id=trace_id,
@@ -321,19 +279,20 @@ async def chat_stream(req: AgentRequest, request: Request):
                     tool_calls_count=tool_calls_count,
                     deltas_count=deltas_count,
                     delta_chars=delta_chars,
+                    sources_count=len(sources),
                 )
                 return
 
             logger.warning("astream_events not available; falling back to non-stream.")
             emit_trace("stream_fallback_no_astream_events", trace_id=trace_id)
 
-            answer = agent.invoke(req.message)
+            answer, sources, _ = agent.invoke_with_sources(req.message)
             if answer:
-                yield _sse({"type": "delta", "value": str(answer)})
+                yield sse({"type": "delta", "value": str(answer)})
                 delta_chars += len(str(answer))
                 deltas_count += 1
 
-            yield _sse({"type": "done"})
+            yield sse({"type": "done", "sources": sources})
             emit_trace(
                 "stream_done",
                 trace_id=trace_id,
@@ -342,6 +301,7 @@ async def chat_stream(req: AgentRequest, request: Request):
                 tool_calls_count=tool_calls_count,
                 deltas_count=deltas_count,
                 delta_chars=delta_chars,
+                sources_count=len(sources),
                 mode="fallback",
             )
 
@@ -357,8 +317,8 @@ async def chat_stream(req: AgentRequest, request: Request):
                 delta_chars=delta_chars,
                 error=str(e),
             )
-            yield _sse({"type": "error", "message": str(e)})
-            yield _sse({"type": "done"})
+            yield sse({"type": "error", "message": str(e)})
+            yield sse({"type": "done"})
 
     return StreamingResponse(
         event_generator(),
