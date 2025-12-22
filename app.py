@@ -1,269 +1,3 @@
-# import torch
-# import types
-
-# torch.classes.__path__ = types.SimpleNamespace(_path=[])
-
-# import os
-# import requests
-# import streamlit as st
-# from datetime import datetime
-# import json
-# import re
-# import html
-
-# from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-
-
-# # -------------------------
-# # API CONFIG
-# # -------------------------
-# API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
-# CHAT_URL = f"{API_BASE}/api/v1/chat"
-
-
-# # -------------------------
-# # UI CONFIG
-# # -------------------------
-# st.set_page_config(
-#     page_title="Weather & Clothing Assistant",
-#     page_icon="⛅",
-#     layout="wide",
-# )
-
-# st.title("👕🌦️ Weather & Clothing Chat Assistant")
-# st.markdown("Ask me about what to wear, weather conditions, or anything else!")
-
-# st.markdown(
-#     """
-# <style>
-# .element-container .markdown-text-container {
-#     font-size: 16px !important;
-#     line-height: 1.6 !important;
-# }
-# .chat-bubble {
-#     padding: 10px;
-#     border-radius: 10px;
-#     max-width: 80%;
-#     margin-bottom: 5px;
-#     color: #222;
-#     font-weight: 500;
-#     white-space: normal;
-# }
-# .user-bubble {
-#     background-color: #DCF8C6;
-#     align-self: flex-end;
-# }
-# .bot-bubble {
-#     background-color: #F1F0F0;
-#     align-self: flex-start;
-# }
-# .timestamp {
-#     font-size: 12px;
-#     color: #666;
-#     float: right;
-# }
-# </style>
-# """,
-#     unsafe_allow_html=True,
-# )
-
-
-# # -------------------------
-# # REASONING PARSER
-# # -------------------------
-# _REASONING_RE = re.compile(r"(?is)<reasoning>\s*(.*?)\s*</reasoning>")
-
-# def split_reasoning(content: str):
-#     if not content:
-#         return None, ""
-#     m = _REASONING_RE.search(content)
-#     if not m:
-#         return None, content.strip()
-#     reasoning = m.group(1).strip()
-#     answer = _REASONING_RE.sub("", content, count=1).strip()
-#     return reasoning, answer
-
-# def strip_reasoning_during_stream(raw: str):
-#     """
-#     Kept for compatibility; not used in non-streaming mode.
-#     """
-#     if not raw:
-#         return ""
-#     lower = raw.lower()
-#     if "<reasoning>" in lower and "</reasoning>" not in lower:
-#         before = lower.split("<reasoning>", 1)[0]
-#         return before.strip()
-#     _, answer = split_reasoning(raw)
-#     return answer
-
-
-# # -------------------------
-# # TERMINAL LOGGING ONLY
-# # -------------------------
-# def tlog(message: str) -> None:
-#     ts = datetime.now().strftime("%H:%M:%S")
-#     print(f"[{ts}] {message}", flush=True)
-
-# def _safe_preview(x, n=160):
-#     if x is None:
-#         return ""
-#     if not isinstance(x, str):
-#         try:
-#             x = json.dumps(x, ensure_ascii=False)
-#         except Exception:
-#             x = str(x)
-#     x = x.strip().replace("\n", " ")
-#     return x[:n] + ("..." if len(x) > n else "")
-
-# def render_bubble(content: str, who: str, timestamp: str):
-#     safe = html.escape(content).replace("\n", "<br>")
-#     bubble_class = "user-bubble" if who == "user" else "bot-bubble"
-#     return f"""
-# <div class="chat-bubble {bubble_class}">
-#   {safe}
-#   <div class="timestamp">{timestamp}</div>
-# </div>
-# """
-
-# def is_tool_only_ai(msg: AIMessage) -> bool:
-#     """
-#     Still kept; in API mode there are no tool-only AI messages usually.
-#     """
-#     c = (msg.content or "").strip()
-#     tool_calls = getattr(msg, "tool_calls", None) or getattr(msg, "additional_kwargs", {}).get("tool_calls")
-#     return (not c) and bool(tool_calls)
-
-
-# # -------------------------
-# # SESSION STATE INIT
-# # -------------------------
-# if "chat_history" not in st.session_state:
-#     st.session_state.chat_history = []
-
-
-# # -------------------------
-# # TOP ACTIONS
-# # -------------------------
-# col1, col2 = st.columns([1, 6])
-# with col1:
-#     if st.button("Clear Chat"):
-#         st.session_state.chat_history = []
-#         tlog("Chat cleared by user.")
-#         st.rerun()
-
-# with col2:
-#     st.caption(f"API: {CHAT_URL}")
-
-
-# # -------------------------
-# # RENDER EXISTING CHAT FIRST
-# # -------------------------
-# assistant_i = 0
-
-# for msg in st.session_state.chat_history:
-#     timestamp = datetime.now().strftime("%H:%M")
-
-#     if isinstance(msg, ToolMessage):
-#         continue
-
-#     if isinstance(msg, HumanMessage):
-#         with st.chat_message("user", avatar="👤"):
-#             st.markdown(render_bubble(msg.content, "user", timestamp), unsafe_allow_html=True)
-
-#     elif isinstance(msg, AIMessage):
-#         if is_tool_only_ai(msg):
-#             continue
-
-#         reasoning_text, answer_text = split_reasoning(msg.content or "")
-#         content_to_show = answer_text.strip() if answer_text else (msg.content or "").strip()
-
-#         if not content_to_show and not reasoning_text:
-#             continue
-
-#         with st.chat_message("assistant", avatar="🤖"):
-#             if reasoning_text:
-#                 unique_label = "Reasoning" + ("\u200b" * assistant_i)
-#                 with st.expander(unique_label, expanded=False):
-#                     st.markdown(reasoning_text)
-
-#             if content_to_show:
-#                 st.markdown(render_bubble(content_to_show, "assistant", timestamp), unsafe_allow_html=True)
-
-#         assistant_i += 1
-
-
-# # -------------------------
-# # CHAT INPUT
-# # -------------------------
-# user_input = st.chat_input("Type your message here...")
-
-
-# def call_chat_api(message: str) -> str:
-#     """
-#     Calls FastAPI /api/v1/chat
-#     Expects response: {"answer": "..."}
-#     """
-#     payload = {"message": message}
-
-#     try:
-#         r = requests.post(CHAT_URL, json=payload, timeout=(10, 180))
-#     except requests.RequestException as e:
-#         raise RuntimeError(f"API request failed: {e}")
-
-#     if r.status_code != 200:
-#         try:
-#             err = r.json()
-#         except Exception:
-#             err = {"detail": r.text}
-#         raise RuntimeError(f"HTTP {r.status_code}: {err}")
-
-#     try:
-#         data = r.json()
-#     except Exception:
-#         raise RuntimeError("API returned non-JSON response.")
-
-#     ans = (data.get("answer") if isinstance(data, dict) else "") or ""
-#     return str(ans)
-
-
-# # -------------------------
-# # HANDLE NEW INPUT (API call)
-# # -------------------------
-# if user_input:
-#     tlog(f"User: {_safe_preview(user_input, 200)}")
-
-#     # Append user message to history
-#     st.session_state.chat_history.append(HumanMessage(content=user_input))
-
-#     # Render user bubble immediately
-#     timestamp = datetime.now().strftime("%H:%M")
-#     with st.chat_message("user", avatar="👤"):
-#         st.markdown(render_bubble(user_input, "user", timestamp), unsafe_allow_html=True)
-
-#     # Call API and render assistant answer
-#     with st.chat_message("assistant", avatar="🤖"):
-#         placeholder = st.empty()
-#         ts = datetime.now().strftime("%H:%M")
-#         placeholder.markdown(render_bubble("Thinking...", "assistant", ts), unsafe_allow_html=True)
-
-#         try:
-#             tlog(f"Calling API: {CHAT_URL}")
-#             answer = call_chat_api(user_input)
-
-#             if answer.strip():
-#                 st.session_state.chat_history.append(AIMessage(content=answer))
-#             else:
-#                 st.session_state.chat_history.append(AIMessage(content="(Empty answer)"))
-
-#         except Exception as e:
-#             tlog(f"ERROR during API call: {repr(e)}")
-#             st.session_state.chat_history.append(
-#                 AIMessage(content=f"Sorry, an error occurred while calling the API:\n{e}")
-#             )
-
-#     # Rerun to render the reasoning expander cleanly and persist state
-#     st.rerun()
-
 import torch
 import types
 
@@ -281,10 +15,15 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 
 # -------------------------
-# API CONFIG (STREAMING ENDPOINT)
+# API CONFIG (STREAMING + QA ENDPOINTS)
 # -------------------------
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 CHAT_STREAM_URL = f"{API_BASE}/api/v1/chat/stream"
+CHAT_QA_URL = f"{API_BASE}/api/v1/chat/qa"
+
+# Avatars (keep consistent everywhere)
+USER_AVATAR = "👤"
+ASSISTANT_AVATAR = "🤖"
 
 
 # -------------------------
@@ -400,6 +139,50 @@ def is_tool_only_ai(msg: AIMessage) -> bool:
     return (not c) and bool(tool_calls)
 
 
+def render_sources(sources) -> str:
+    if not sources:
+        return ""
+    lines = []
+    for s in sources:
+        url = (s.get("url") if isinstance(s, dict) else None) or ""
+        name = (s.get("name") if isinstance(s, dict) else None) or url
+        if url:
+            lines.append(f"- [{name}]({url})")
+    return "\n".join(lines)
+
+
+def call_qa_api(message: str):
+    """
+    Calls FastAPI /api/v1/chat/qa
+    Expects response: {"answer": "...", "sources": [...]}
+    """
+    payload = {"message": message}
+
+    try:
+        r = requests.post(CHAT_QA_URL, json=payload, timeout=(10, 180))
+    except requests.RequestException as e:
+        raise RuntimeError(f"API request failed: {e}")
+
+    if r.status_code != 200:
+        try:
+            err = r.json()
+        except Exception:
+            err = {"detail": r.text}
+        raise RuntimeError(f"HTTP {r.status_code}: {err}")
+
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError("API returned non-JSON response.")
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected response: {data}")
+
+    answer = (data.get("answer") if isinstance(data, dict) else "") or ""
+    sources = data.get("sources") or []
+    return str(answer), sources
+
+
 # -------------------------
 # SESSION STATE INIT
 # -------------------------
@@ -418,7 +201,7 @@ with col1:
         st.rerun()
 
 with col2:
-    st.caption(f"Streaming API: {CHAT_STREAM_URL}")
+    st.caption(f"Streaming API: {CHAT_STREAM_URL} | QA API: {CHAT_QA_URL}")
 
 
 # -------------------------
@@ -433,7 +216,7 @@ for msg in st.session_state.chat_history:
         continue
 
     if isinstance(msg, HumanMessage):
-        with st.chat_message("user", avatar="👤"):
+        with st.chat_message("user", avatar=USER_AVATAR):
             st.markdown(render_bubble(msg.content, "user", timestamp), unsafe_allow_html=True)
 
     elif isinstance(msg, AIMessage):
@@ -446,7 +229,7 @@ for msg in st.session_state.chat_history:
         if not content_to_show and not reasoning_text:
             continue
 
-        with st.chat_message("assistant", avatar="🤖"):
+        with st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
             if reasoning_text:
                 unique_label = "Reasoning" + ("\u200b" * assistant_i)
                 with st.expander(unique_label, expanded=False):
@@ -454,6 +237,11 @@ for msg in st.session_state.chat_history:
 
             if content_to_show:
                 st.markdown(render_bubble(content_to_show, "assistant", timestamp), unsafe_allow_html=True)
+
+            sources_md = render_sources((getattr(msg, "additional_kwargs", {}) or {}).get("sources"))
+            if sources_md:
+                st.markdown("**Sources**")
+                st.markdown(sources_md)
 
         assistant_i += 1
 
@@ -464,13 +252,14 @@ for msg in st.session_state.chat_history:
 user_input = st.chat_input("Type your message here...")
 
 
-def stream_from_api(message: str, placeholder_md) -> str:
+def stream_from_api(message: str, placeholder_md):
     """
     Connect to FastAPI SSE stream and update UI token-by-token.
-    Returns full raw text (may include <reasoning>...</reasoning>).
+    Returns (full raw text, sources) where sources come from final SSE event.
     """
     ts = datetime.now().strftime("%H:%M")
     full_text = ""
+    sources = []
 
     # initial empty assistant bubble
     placeholder_md.markdown(render_bubble("", "assistant", ts), unsafe_allow_html=True)
@@ -530,20 +319,21 @@ def stream_from_api(message: str, placeholder_md) -> str:
                     raise RuntimeError(ev.get("message", "Unknown streaming error"))
 
                 elif etype == "done":
+                    sources = ev.get("sources") or []
                     break
 
         # final render (ensure reasoning stripped for visible bubble)
         shown = strip_reasoning_during_stream(full_text)
         placeholder_md.markdown(render_bubble(shown, "assistant", ts), unsafe_allow_html=True)
 
-        return full_text
+        return full_text, sources
 
     except Exception as e:
         raise e
 
 
 # -------------------------
-# HANDLE NEW INPUT (TRUE STREAMING FROM API)
+# HANDLE NEW INPUT (STREAM ANSWER, THEN FETCH SOURCES FROM QA)
 # -------------------------
 if user_input:
     tlog(f"User: {_safe_preview(user_input, 200)}")
@@ -553,28 +343,42 @@ if user_input:
 
     # render user bubble
     timestamp = datetime.now().strftime("%H:%M")
-    with st.chat_message("user", avatar="👤"):
+    with st.chat_message("user", avatar=USER_AVATAR):
         st.markdown(render_bubble(user_input, "user", timestamp), unsafe_allow_html=True)
 
-    # stream assistant response
-    with st.chat_message("assistant", avatar="🤖"):
-        placeholder = st.empty()
+    # stream assistant response, then fetch sources via QA endpoint
+    with st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
+        answer_placeholder = st.empty()
+        sources_placeholder = st.empty()
 
         try:
             tlog(f"Streaming from API: {CHAT_STREAM_URL}")
-            full_answer = stream_from_api(user_input, placeholder)
+            full_answer, _ = stream_from_api(user_input, answer_placeholder)
 
-            # store full raw answer (so rerun shows reasoning expander correctly)
+            shown = strip_reasoning_during_stream(full_answer)
+            ts = datetime.now().strftime("%H:%M")
+            answer_placeholder.markdown(render_bubble(shown, "assistant", ts), unsafe_allow_html=True)
+
+            sources = []
+            try:
+                tlog(f"Calling QA API for sources: {CHAT_QA_URL}")
+                _, sources = call_qa_api(user_input)
+            except Exception as e:
+                tlog(f"ERROR during QA call (sources fetch): {repr(e)}")
+
+            sources_md = render_sources(sources)
+            if sources_md:
+                sources_placeholder.markdown("**Sources**\n" + sources_md)
+
             if full_answer.strip():
-                st.session_state.chat_history.append(AIMessage(content=full_answer))
+                st.session_state.chat_history.append(AIMessage(content=full_answer, additional_kwargs={"sources": sources}))
             else:
-                st.session_state.chat_history.append(AIMessage(content="(Empty answer)"))
+                st.session_state.chat_history.append(AIMessage(content="(Empty answer)", additional_kwargs={"sources": sources}))
 
         except Exception as e:
-            tlog(f"ERROR during API streaming: {repr(e)}")
+            tlog(f"ERROR during streaming: {repr(e)}")
             st.session_state.chat_history.append(
-                AIMessage(content=f"Sorry, an error occurred while calling the API stream:\n{e}")
+                AIMessage(content=f"Sorry, an error occurred while streaming the answer:\n{e}")
             )
 
     st.rerun()
-
