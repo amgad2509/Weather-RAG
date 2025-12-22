@@ -7,7 +7,7 @@ An LLM-powered assistant that provides **current weather**, **clothing recommend
 
 ![Workflow](assets/flow.png)
 
-**Demo:** [assets/RAG_Weather_Applab.mp4](assets/RAG_Weather_Demo)
+**Demo:** [assets/RAG_Weather_Applab.mp4](assets/RAG_Weather_Demo_final)
 
 ---
 
