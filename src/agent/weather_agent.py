@@ -18,7 +18,7 @@ from ..tools import make_weather_query_tool, internet_search, dummy_weather
 from ..rag import build_vectorstore, build_retriever_tool
 from src.utils.source_parsers import (
     parse_sources_from_internet_output,
-    parse_sources_from_retriever_output,
+    #parse_sources_from_retriever_output,
 )
 from src.utils.telemetry import Stopwatch
 
